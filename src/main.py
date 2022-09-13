@@ -9,6 +9,7 @@ from sentence_transformers import SentenceTransformer
 
 ##### INDEXING #####
 
+
 def index_data():
     print("Creating the 'articles' index.")
     client.indices.delete(index=INDEX_NAME, ignore=[404])
@@ -21,9 +22,10 @@ def index_data():
         docs = json.load(data_file)
         index_batch(docs)
         print("Indexed {} documents.".format(len(docs)))
-    
+
     client.indices.refresh(index=INDEX_NAME)
     print("Done indexing.")
+
 
 def index_batch(docs):
     titles = [doc["title"] for doc in docs]
@@ -38,7 +40,9 @@ def index_batch(docs):
         requests.append(request)
     bulk(client, requests)
 
+
 ##### SEARCHING #####
+
 
 def run_query_loop():
     while True:
@@ -46,6 +50,7 @@ def run_query_loop():
             handle_query()
         except KeyboardInterrupt:
             return
+
 
 def handle_query():
     query = input("Enter query: ")
@@ -59,8 +64,8 @@ def handle_query():
             "query": {"match_all": {}},
             "script": {
                 "source": "cosineSimilarity(params.query_vector, doc['title_vector']) + 1.0",
-                "params": {"query_vector": query_vector}
-            }
+                "params": {"query_vector": query_vector},
+            },
         }
     }
 
@@ -70,8 +75,8 @@ def handle_query():
         body={
             "size": SEARCH_SIZE,
             "query": script_query,
-            "_source": {"includes": ["title"]}
-        }
+            "_source": {"includes": ["title"]},
+        },
     )
     search_time = time.time() - search_start
 
@@ -84,25 +89,26 @@ def handle_query():
         print(hit["_source"])
         print()
 
+
 ##### EMBEDDING #####
+
 
 def embed_text(text):
     vectors = embeddings_model.encode(text)
     return [vector.tolist() for vector in vectors]
 
+
 ##### MAIN SCRIPT #####
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     INDEX_NAME = "articles"
     INDEX_FILE = "data/articles/index.json"
     DATA_FILE = "data/articles/articles.json"
-    BATCH_SIZE = 1000
     SEARCH_SIZE = 5
-    GPU_LIMIT = 0.5
-    
+
     client = Elasticsearch()
     embeddings_model = SentenceTransformer("all-MiniLM-L6-v2")
 
     index_data()
-    run_query_loop() 
+    run_query_loop()
     print("Done.")

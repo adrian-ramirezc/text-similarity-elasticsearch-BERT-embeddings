@@ -3,13 +3,13 @@
     "number_of_shards": 2,
     "number_of_replicas": 1
   },
-   "mappings": {
+  "mappings": {
     "dynamic": "true",
     "_source": {
       "enabled": "true"
     },
     "properties": {
-      "user": {
+      "id": {
         "type": "keyword"
       },
       "title": {
@@ -22,8 +22,33 @@
       "description": {
         "type": "text"
       },
+      "description_vector": {
+        "type": "dense_vector",
+        "dims": 384
+      },
       "content": {
         "type": "text"
+      },
+      "section": {
+        "type": "text"
+      },
+      "section_vector": {
+        "type": "dense_vector",
+        "dims": 384
+      },
+      "keywords": {
+        "type": "text"
+      },
+      "keywords_vector": {
+        "type": "dense_vector",
+        "dims": 384
+      },
+      "topic": {
+        "type": "text"
+      },
+      "topic_vector": {
+        "type": "dense_vector",
+        "dims": 384
       }
     }
   }
