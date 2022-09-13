@@ -1,3 +1,4 @@
+Modified from: https://github.com/jtibshirani/text-embeddings
 # Text Embeddings in Elasticsearch
 
 This repository provides a simple example of how Elasticsearch can be used for similarity
