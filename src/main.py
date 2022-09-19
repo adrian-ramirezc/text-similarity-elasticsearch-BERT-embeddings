@@ -1,17 +1,18 @@
+from importlib.resources import path
 import json
 import time
 
-from typing import List
+from bs4 import BeautifulSoup
 
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 
 from sentence_transformers import SentenceTransformer
 
-
+CLIENT = "weka_con"
 INDEX_NAME = "articles"
-INDEX_FILE = "data/articles/index.json"
-DATA_FILE = "data/articles/articles.json"
+INDEX_FILE = f"data/{CLIENT}/index.json"
+DATA_FILE = f"data/{CLIENT}/articles.json"
 SEARCH_SIZE = 5
 
 class TextSimilaritySearch:
@@ -22,50 +23,91 @@ class TextSimilaritySearch:
         self.data_file = DATA_FILE
         self.search_size = SEARCH_SIZE
         self.embedding_model = embedding_model
-        self.docs = None
+        self.docs = self.load_documents()
 
-
-    def index_data(self):
-        print(f"Creating {self.index_name} index ...")
-        client.indices.delete(index=self.index_name, ignore=[404])
-
-        with open(self.index_file) as f:
-            source = f.read().strip()
-            client.indices.create(index=self.index_name, body=source)
-
+    def load_documents(self):
         with open(self.data_file) as f:
-            self.docs = json.load(f)
-            self.index_documents()
-            print(f"Indexed {len(self.docs)} documents.")
+            return json.load(f)[:100]
+    
+    def create_index(self):
+        with open(self.index_file) as f:
+            self.client.indices.delete(index=self.index_name, ignore=[404])
+            self.client.indices.create(index=self.index_name, body=f.read().strip())
+    
+    def index_data(self):
+        
+        print(f"Creating {self.index_name} index ...")
+        self.create_index()
 
+        print(f"Indexing {len(self.docs)} documents ...")
+        self.index_documents()
+
+        print("Refreshing index ...")
         client.indices.refresh(index=self.index_name)
-        print("Done indexing")
+        
+        print("Indexing finished")
+    
+    @staticmethod
+    def clean_content(text:str):
+        if text:
+            return BeautifulSoup(text, "html.parser").text
+        else:
+            return "empty"
 
-
+    @staticmethod
+    def group_by_id(ids, vectors):
+        kw_vector_list = []
+        grouped_kw_vectors = []
+        previous_id = ids[0]
+        last_kw_vector = []
+        for id, vector in zip(ids, vectors):
+            if id == previous_id:
+                kw_vector_list.append({"vector": vector})
+                last_kw_vector = kw_vector_list
+            else:
+                grouped_kw_vectors.append(kw_vector_list)
+                kw_vector_list = [{"vector": vector}]
+                previous_id = id
+        grouped_kw_vectors.append(last_kw_vector)
+        return grouped_kw_vectors
+    
     def index_documents(self):
         titles = [doc["title"] for doc in self.docs]
         descriptions = [doc["description"] for doc in self.docs]
-        sections = [doc["section"] for doc in self.docs]
-        keywords = [doc["keywords"] for doc in self.docs]
-        topics = [doc["topic"] for doc in self.docs]
+        contents = [self.clean_content(doc["content"]) for doc in self.docs]
+        keywords_with_id = [(doc["id"], keyword) for doc in self.docs for keyword in doc["keywords"].split(",")]
+        topics_with_id = [(doc["id"], topic) for doc in self.docs for topic in doc["topic"].split(",")]
 
+        ids_keywords = [id for id,keyword in keywords_with_id]
+        keywords = [keyword for id,keyword in keywords_with_id]
+
+        ids_topics = [id for id,topic in topics_with_id]
+        topics = [topic for id,topic in topics_with_id]
+
+        print("Computing BERT embeddings ...")
         title_vectors = self.embed_text(titles)
         descriptions_vectors = self.embed_text(descriptions)
-        sections_vectors = self.embed_text(sections)
-        keywords_vectors = self.embed_text(keywords)
-        topics_vectors = self.embed_text(topics)
+        contents_vectors = self.embed_text(contents)
+        keywords_vectors_ = self.embed_text(keywords)
+        topics_vectors_ = self.embed_text(topics)
+
+        keywords_vectors = self.group_by_id(ids_keywords, keywords_vectors_)
+        topics_vectors = self.group_by_id(ids_topics, topics_vectors_)
 
         requests = []
         for i, doc in enumerate(self.docs):
             request = doc
             request["_op_type"] = "index"
             request["_index"] = self.index_name
+            request["content"] = self.clean_content(doc["content"]) 
             request["title_vector"] = title_vectors[i]
             request["description_vector"] = descriptions_vectors[i]
-            request["section_vector"] = sections_vectors[i]
+            request["content_vector"] = contents_vectors[i]
             request["keywords_vector"] = keywords_vectors[i]
             request["topic_vector"] = topics_vectors[i]
             requests.append(request)
+        
+        print("Indexing documents ...")
         bulk(self.client, requests)
 
 
@@ -84,27 +126,59 @@ class TextSimilaritySearch:
         query_vector = self.embed_text(query)
         embedding_time = time.time() - embedding_start
     
-        script_query = {
-            "script_score": {
-                "query": {"match_all": {}},
-                "script": {
-                    "source":   """   params.title_w * cosineSimilarity(params.query_vector, doc['title_vector']) 
-                                    + params.description_w * cosineSimilarity(params.query_vector, doc['description_vector']) 
-                                    + params.keywords_w * cosineSimilarity(params.query_vector, doc['keywords_vector']) 
-                                    + params.section_w * cosineSimilarity(params.query_vector, doc['section_vector']) 
-                                    + params.topic_w * cosineSimilarity(params.query_vector, doc['topic_vector'])
-                                    + 5.0
-                                """,
-                    "params": {
-                        "query_vector": query_vector, 
-                        "title_w": 1.0,
-                        "description_w": 1.0,
-                        "keywords_w": 0.8,
-                        "section_w": 0.8,
-                        "topic_w": 0.8,
-                        },
-                },
-            }
+        my_query = {
+            "bool":{
+                "must": [
+                    {"nested": {
+                        "path": "keywords_vector",
+                        "score_mode": "max",
+                        "query":{
+                            "script_score": {
+                                "query": {"match_all": {}},
+                                "script": {
+                                    "source":   """  
+                                                    1.0 + cosineSimilarity(params.query_vector, 'keywords_vector.vector')
+                                                """,
+                                    "params": {
+                                        "query_vector": query_vector, 
+                                        },
+                                },
+                            }
+                        }
+                    }},
+                    {"nested": {
+                        "path": "topic_vector",
+                        "score_mode": "max",
+                        "query":{
+                            "script_score": {
+                                "query": {"match_all": {}},
+                                "script": {
+                                    "source":   """
+                                                1.0 +  cosineSimilarity(params.query_vector, 'topic_vector.vector')
+                                                """,
+                                    "params": {
+                                        "query_vector": query_vector, 
+                                        },
+                                },
+                            }
+                        }
+                    }}
+                    ,{"script_score": {
+                        "query": {"match_all": {}},
+                        "script": {
+                            "source":   """  
+                                            cosineSimilarity(params.query_vector, 'title_vector') + 
+                                            cosineSimilarity(params.query_vector, 'description_vector') +
+                                            cosineSimilarity(params.query_vector, 'content_vector') +
+                                            3.0
+                                        """,
+                            "params": {
+                                "query_vector": query_vector, 
+                                }
+                        }                    
+                    }}
+                ] 
+            }           
         }
 
         search_start = time.time() 
@@ -112,8 +186,8 @@ class TextSimilaritySearch:
             index=self.index_name,
             body={
                 "size": self.search_size,
-                "query": script_query,
-                "_source": {"includes": ["title", "section", "keywords", "topic"]},
+                "query": my_query,
+                "_source": {"includes": ["title", "description", "content", "link", "keywords", "topic"]},
             },
         )
         search_time = time.time() - search_start
@@ -123,12 +197,13 @@ class TextSimilaritySearch:
         print("embedding time: {:.2f} ms".format(embedding_time * 1000))
         print("search time: {:.2f} ms".format(search_time * 1000))
         for hit in response["hits"]["hits"]:
-            print("id: {}, score: {}".format(hit["_id"], hit["_score"]))
-            print(hit["_source"])
+            print(f'score: {hit["_score"] - 6.0}') # Substracting the added number above.
+            for field, text in hit["_source"].items():
+                print(f"{field}: {text[:150]}")
             print()
 
     def embed_text(self, text):
-        vectors = self.embedding_model.encode(text)
+        vectors = self.embedding_model.encode(text, show_progress_bar=True)
         return [vector.tolist() for vector in vectors]
 
 
