@@ -13,7 +13,7 @@ CLIENT = "weka_con"
 INDEX_NAME = "articles"
 INDEX_FILE = f"data/{CLIENT}/index.json"
 DATA_FILE = f"data/{CLIENT}/articles.json"
-SEARCH_SIZE = 5
+SEARCH_SIZE = 10
 
 class TextSimilaritySearch:
     def __init__(self, client: Elasticsearch, embedding_model: SentenceTransformer):
@@ -27,7 +27,7 @@ class TextSimilaritySearch:
 
     def load_documents(self):
         with open(self.data_file) as f:
-            return json.load(f)[:100]
+            return json.load(f)
     
     def create_index(self):
         with open(self.index_file) as f:
@@ -75,8 +75,8 @@ class TextSimilaritySearch:
         titles = [doc["title"] for doc in self.docs]
         descriptions = [doc["description"] for doc in self.docs]
         contents = [self.clean_content(doc["content"]) for doc in self.docs]
-        keywords_with_id = [(doc["id"], keyword) for doc in self.docs for keyword in doc["keywords"].split(",")]
-        topics_with_id = [(doc["id"], topic) for doc in self.docs for topic in doc["topic"].split(",")]
+        keywords_with_id = [(doc["id"], keyword) for doc in self.docs for keyword in doc["keywords"].split(",") if keyword]
+        topics_with_id = [(doc["id"], topic) for doc in self.docs for topic in doc["topic"].split(",") if topic]
 
         ids_keywords = [id for id,keyword in keywords_with_id]
         keywords = [keyword for id,keyword in keywords_with_id]
@@ -122,85 +122,97 @@ class TextSimilaritySearch:
     def handle_query(self):
         query = input("Enter query: ")
 
+        selection_list = query.split(",")
+
         embedding_start = time.time()
-        query_vector = self.embed_text(query)
+        query_vector_list = self.embed_text(selection_list)
         embedding_time = time.time() - embedding_start
-    
-        my_query = {
-            "bool":{
-                "must": [
-                    {"nested": {
-                        "path": "keywords_vector",
-                        "score_mode": "max",
-                        "query":{
-                            "script_score": {
-                                "query": {"match_all": {}},
-                                "script": {
-                                    "source":   """  
-                                                    1.0 + cosineSimilarity(params.query_vector, 'keywords_vector.vector')
-                                                """,
-                                    "params": {
-                                        "query_vector": query_vector, 
-                                        },
-                                },
-                            }
-                        }
-                    }},
-                    {"nested": {
-                        "path": "topic_vector",
-                        "score_mode": "max",
-                        "query":{
-                            "script_score": {
-                                "query": {"match_all": {}},
-                                "script": {
-                                    "source":   """
-                                                1.0 +  cosineSimilarity(params.query_vector, 'topic_vector.vector')
-                                                """,
-                                    "params": {
-                                        "query_vector": query_vector, 
-                                        },
-                                },
-                            }
-                        }
-                    }}
-                    ,{"script_score": {
-                        "query": {"match_all": {}},
-                        "script": {
-                            "source":   """  
-                                            cosineSimilarity(params.query_vector, 'title_vector') + 
-                                            cosineSimilarity(params.query_vector, 'description_vector') +
-                                            cosineSimilarity(params.query_vector, 'content_vector') +
-                                            3.0
-                                        """,
-                            "params": {
-                                "query_vector": query_vector, 
+
+        total_search_time = 0 
+
+        for query_vector in query_vector_list:
+            my_query = {
+                "bool":{
+                    "should": [
+                        {"nested": {
+                            "path": "keywords_vector",
+                            "score_mode": "max",
+                            "query":{
+                                "script_score": {
+                                    "query": {"match_all": {}},
+                                    "script": {
+                                        "source":   """  
+                                                        doc['keywords_vector.vector'].size() == 0 ? 0: 1.0 + cosineSimilarity(params.query_vector, 'keywords_vector.vector')
+                                                    """,
+                                        "params": {
+                                            "query_vector": query_vector, 
+                                            },
+                                    },
                                 }
-                        }                    
-                    }}
-                ] 
-            }           
-        }
+                            }
+                        }},
+                        {"nested": {
+                            "path": "topic_vector",
+                            "score_mode": "max",
+                            "query":{
+                                "script_score": {
+                                    "query": {"match_all": {}},
+                                    "script": {
+                                        "source":   """
+                                                    doc['topic_vector.vector'].size() == 0 ? 0: 1.0 +  cosineSimilarity(params.query_vector, 'topic_vector.vector')
+                                                    """,
+                                        "params": {
+                                            "query_vector": query_vector, 
+                                            },
+                                    },
+                                }
+                            }
+                        }}
+                        ,{"script_score": {
+                            "query": {"match_all": {}},
+                            "script": {
+                                "source":   """  
+                                                cosineSimilarity(params.query_vector, 'title_vector') + 
+                                                cosineSimilarity(params.query_vector, 'description_vector') +
+                                                cosineSimilarity(params.query_vector, 'content_vector') +
+                                                3.0
+                                            """,
+                                "params": {
+                                    "query_vector": query_vector, 
+                                    }
+                            }                    
+                        }}
+                    ] 
+                }           
+            }
 
-        search_start = time.time() 
-        response = self.client.search(
-            index=self.index_name,
-            body={
-                "size": self.search_size,
-                "query": my_query,
-                "_source": {"includes": ["title", "description", "content", "link", "keywords", "topic"]},
-            },
-        )
-        search_time = time.time() - search_start
+            search_start = time.time() 
+            response = self.client.search(
+                index=self.index_name,
+                body={
+                    "size": self.search_size,
+                    "query": my_query,
+                    "_source": {"includes": ["title", "description", "content", "link", "keywords", "topic"]},
+                },
+            )
+            search_time = time.time() - search_start
 
-        print()
-        print("{} total hits.".format(response["hits"]["total"]["value"]))
-        print("embedding time: {:.2f} ms".format(embedding_time * 1000))
-        print("search time: {:.2f} ms".format(search_time * 1000))
-        for hit in response["hits"]["hits"]:
-            print(f'score: {hit["_score"] - 6.0}') # Substracting the added number above.
-            for field, text in hit["_source"].items():
-                print(f"{field}: {text[:150]}")
-            print()
+            total_search_time += search_time
+
+            # print()
+            # print("{} total hits.".format(response["hits"]["total"]["value"]))
+            # print("search time: {:.2f} ms".format(search_time * 1000))
+            # for hit in response["hits"]["hits"]:
+            #     print(f'score: {hit["_score"] - 5.0}') # Substracting the added number above.
+            #     for field, text in hit["_source"].items():
+            #         print(f"{field}: {text[:150]}")
+            #     print()
+
+        print(f"Search time: {1000*total_search_time:.2f} ms")
+        print(f"Embedding time: {1000*embedding_time:.2f} ms")
+        print(f"Total time: {1000*(total_search_time + embedding_time):.2f} ms")
+
+            
 
     def embed_text(self, text):
         vectors = self.embedding_model.encode(text, show_progress_bar=True)
@@ -214,3 +226,20 @@ if __name__ == "__main__":
     text_similarity = TextSimilaritySearch(client, embedding_model)
     text_similarity.index_data()
     text_similarity.run_query_loop()
+
+
+"""
+Anrufer identifizieren, Caller ID, Werbeanrufe, Nummer blockieren, Spam, iPhone, Android, angebot, handy, laptop, tablet, smartwatch, over-ear-kopfhörer, bestenliste, bluetooth, anc, kabellos, top 10, kaufberatung
+kaufempfehlung, Gaming, home connect, Heimvernetzung, Lautsprecher
+Sonos, Dolby Atmos, smartwatch, bestenliste, fitnessuhr
+tracker, test, vergleich, JBL, Sound
+Kopfhörer, Lautsprecher, Boombox, CES 2022, Las Vegas
+In-Ear-Kopfhörer, Over-Ear, Sony Xperia Pro-I, Smartphone, Test
+Mobilfunk-Netzbetreiber, O2, Telekom, Vodafone, Vergleich
+Tarife, Technik, Service, samsung galaxy s21 fe, realme
+realme gt 2, pro, smartphone, mittelklasse, release
+specs, preis, günstiges smartphonerealme, realme gt 2, pro
+smartphone, mittelklasse, release, specs, preis
+günstiges smartphone, acer, chrombeook, Notebook, CES 2022
+Release, Specs, Preis, Windows, MediaMarket
+"""
